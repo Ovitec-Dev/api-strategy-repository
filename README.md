@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Strategy Repository API
 
 API Gateway backend-only en Next.js para gestión de estrategias de trading con arquitectura orientada a eventos.
@@ -418,3 +419,6 @@ Para soporte, email: desarrollo@ovitec.com
 - [ ] Tests unitarios y de integración
 - [ ] CI/CD pipeline
 - [ ] Documentación OpenAPI/Swagger 
+=======
+# api-strategy-repository
+>>>>>>> fc6f3dc2d9b46e3826c18726bf3e8b5f6b436947
