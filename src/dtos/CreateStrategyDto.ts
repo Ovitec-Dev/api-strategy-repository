@@ -1,27 +1,74 @@
-import { z } from 'zod';
+import { IsString, IsOptional, IsUUID, IsArray, ValidateNested, MinLength, MaxLength, IsEnum, IsObject } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-export const CreateStrategySchema = z.object({
-  name: z.string().min(1, 'El nombre es requerido').max(255, 'El nombre no puede exceder 255 caracteres'),
-  description: z.string().optional(),
-  user_id: z.string().uuid('El user_id debe ser un UUID válido'),
-  rules: z.array(z.object({
-    rule_id: z.string().uuid('El rule_id debe ser un UUID válido'),
-    parameters: z.record(z.any()).optional()
-  })).optional(),
-  metadata: z.record(z.any()).optional()
-});
+export class RuleInputDto {
+  @ApiProperty({ example: '550e8400-e29b-41d4-a716-446655440000', description: 'UUID de la regla' })
+  @IsUUID('4', { message: 'El rule_id debe ser un UUID válido' })
+  rule_id: string;
 
-export type CreateStrategyDto = z.infer<typeof CreateStrategySchema>;
+  @ApiPropertyOptional({ example: { period: 14, oversold: 30 }, description: 'Parámetros de la regla' })
+  @IsOptional()
+  @IsObject()
+  parameters?: Record<string, any>;
+}
 
-export const UpdateStrategySchema = z.object({
-  name: z.string().min(1).max(255).optional(),
-  description: z.string().optional(),
-  status: z.enum(['pending', 'parsed', 'validated', 'invalid', 'tested', 'failed']).optional(),
-  rules: z.array(z.object({
-    rule_id: z.string().uuid(),
-    parameters: z.record(z.any()).optional()
-  })).optional(),
-  metadata: z.record(z.any()).optional()
-});
+export class CreateStrategyDto {
+  @ApiProperty({ example: 'RSI Strategy', description: 'Nombre de la estrategia', minLength: 1, maxLength: 255 })
+  @IsString()
+  @MinLength(1, { message: 'El nombre es requerido' })
+  @MaxLength(255, { message: 'El nombre no puede exceder 255 caracteres' })
+  name: string;
 
-export type UpdateStrategyDto = z.infer<typeof UpdateStrategySchema>; 
+  @ApiPropertyOptional({ example: 'Estrategia basada en RSI', description: 'Descripción de la estrategia' })
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @ApiProperty({ example: '550e8400-e29b-41d4-a716-446655440000', description: 'UUID del usuario' })
+  @IsUUID('4', { message: 'El user_id debe ser un UUID válido' })
+  user_id: string;
+
+  @ApiPropertyOptional({ type: [RuleInputDto], description: 'Lista de reglas asociadas' })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => RuleInputDto)
+  rules?: RuleInputDto[];
+
+  @ApiPropertyOptional({ example: { source: 'manual' }, description: 'Metadata adicional' })
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, any>;
+}
+
+export class UpdateStrategyDto {
+  @ApiPropertyOptional({ example: 'Updated Strategy Name', minLength: 1, maxLength: 255 })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  name?: string;
+
+  @ApiPropertyOptional({ example: 'Updated description' })
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @ApiPropertyOptional({ example: 'validated', enum: ['pending', 'parsed', 'validated', 'invalid', 'tested', 'failed'] })
+  @IsOptional()
+  @IsEnum(['pending', 'parsed', 'validated', 'invalid', 'tested', 'failed'])
+  status?: string;
+
+  @ApiPropertyOptional({ type: [RuleInputDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => RuleInputDto)
+  rules?: RuleInputDto[];
+
+  @ApiPropertyOptional({ example: { source: 'manual' } })
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, any>;
+}

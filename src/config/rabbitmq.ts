@@ -1,23 +1,31 @@
-import amqp, { Connection, Channel, Message } from 'amqplib';
+import * as amqp from 'amqplib';
 import { EventEmitter } from 'events';
 
+export interface RabbitMQOptions {
+  url?: string;
+  exchange?: string;
+}
+
 export class RabbitMQConfig extends EventEmitter {
-  private connection: Connection | null = null;
-  private channel: Channel | null = null;
+  private connection: amqp.Connection | null = null;
+  private channel: amqp.Channel | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectAttempts = 20;
   private reconnectDelay = 5000;
+  private options: RabbitMQOptions = {};
 
   constructor() {
     super();
   }
 
-  async connect(): Promise<void> {
+  async connect(options: RabbitMQOptions = {}): Promise<void> {
+    this.options = { ...this.options, ...options };
     try {
-      const url = process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672';
-      this.connection = await amqp.connect(url);
-      
-      this.connection.on('error', (error) => {
+      const url = this.options.url || process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672';
+      const conn = await amqp.connect(url);
+      this.connection = conn as unknown as amqp.Connection;
+
+      this.connection.on('error', (error: any) => {
         console.error('RabbitMQ connection error:', error);
         this.handleReconnect();
       });
@@ -27,18 +35,20 @@ export class RabbitMQConfig extends EventEmitter {
         this.handleReconnect();
       });
 
-      this.channel = await this.connection.createChannel();
-      
-      // Declare exchange
-      const exchangeName = process.env.RABBITMQ_EXCHANGE || 'trading_events';
-      await this.channel.assertExchange(exchangeName, 'topic', { durable: true });
-      
+      this.channel = await (this.connection as any).createChannel();
+
+      const exchangeName = this.options.exchange || process.env.RABBITMQ_EXCHANGE || 'trading_events';
+      if (this.channel) {
+        await this.channel.assertExchange(exchangeName, 'topic', { durable: true });
+      }
+
       console.log('RabbitMQ connected successfully');
       this.reconnectAttempts = 0;
       this.emit('connected');
     } catch (error) {
       console.error('Failed to connect to RabbitMQ:', error);
       this.handleReconnect();
+      throw error;
     }
   }
 
@@ -51,7 +61,7 @@ export class RabbitMQConfig extends EventEmitter {
 
     this.reconnectAttempts++;
     console.log(`Attempting to reconnect to RabbitMQ (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-    
+
     setTimeout(async () => {
       try {
         await this.connect();
@@ -67,9 +77,9 @@ export class RabbitMQConfig extends EventEmitter {
         throw new Error('RabbitMQ channel not available');
       }
 
-      const exchangeName = process.env.RABBITMQ_EXCHANGE || 'trading_events';
+      const exchangeName = this.options.exchange || process.env.RABBITMQ_EXCHANGE || 'trading_events';
       const messageBuffer = Buffer.from(JSON.stringify(message));
-      
+
       const result = this.channel.publish(
         exchangeName,
         routingKey,
@@ -80,10 +90,6 @@ export class RabbitMQConfig extends EventEmitter {
         }
       );
 
-      if (result) {
-        console.log(`Message published to ${routingKey}:`, message);
-      }
-
       return result;
     } catch (error) {
       console.error('Failed to publish message:', error);
@@ -91,35 +97,25 @@ export class RabbitMQConfig extends EventEmitter {
     }
   }
 
-  async consumeMessages(queueName: string, callback: (message: Message) => void): Promise<void> {
+  async consumeMessages(queueName: string, callback: (message: amqp.Message) => void): Promise<void> {
     try {
       if (!this.channel) {
         throw new Error('RabbitMQ channel not available');
       }
 
-      // Declare queue
       await this.channel.assertQueue(queueName, { durable: true });
-      
-      // Consume messages
-      await this.channel.consume(queueName, (message) => {
+
+      await this.channel.consume(queueName, (message: amqp.Message | null) => {
         if (message) {
           try {
-            const content = JSON.parse(message.content.toString());
-            console.log(`Message received from ${queueName}:`, content);
-            
             callback(message);
-            
-            // Acknowledge message
             this.channel?.ack(message);
           } catch (error) {
             console.error('Error processing message:', error);
-            // Reject message and requeue
             this.channel?.nack(message, false, true);
           }
         }
       });
-
-      console.log(`Started consuming messages from ${queueName}`);
     } catch (error) {
       console.error('Failed to consume messages:', error);
     }
@@ -131,15 +127,9 @@ export class RabbitMQConfig extends EventEmitter {
         throw new Error('RabbitMQ channel not available');
       }
 
-      const exchangeName = process.env.RABBITMQ_EXCHANGE || 'trading_events';
-      
-      // Declare queue
+      const exchangeName = this.options.exchange || process.env.RABBITMQ_EXCHANGE || 'trading_events';
       await this.channel.assertQueue(queueName, { durable: true });
-      
-      // Bind queue to exchange
       await this.channel.bindQueue(queueName, exchangeName, routingKey);
-      
-      console.log(`Queue ${queueName} bound to exchange ${exchangeName} with routing key ${routingKey}`);
     } catch (error) {
       console.error('Failed to bind queue to exchange:', error);
     }
@@ -151,13 +141,11 @@ export class RabbitMQConfig extends EventEmitter {
         await this.channel.close();
         this.channel = null;
       }
-      
+
       if (this.connection) {
-        await this.connection.close();
+        await (this.connection as any).close();
         this.connection = null;
       }
-      
-      console.log('RabbitMQ disconnected');
     } catch (error) {
       console.error('Error disconnecting from RabbitMQ:', error);
     }
@@ -168,5 +156,4 @@ export class RabbitMQConfig extends EventEmitter {
   }
 }
 
-// Singleton instance
-export const rabbitMQConfig = new RabbitMQConfig(); 
+export const rabbitMQConfig = new RabbitMQConfig();

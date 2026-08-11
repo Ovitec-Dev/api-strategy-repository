@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Strategy Repository DB",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "strategy_repository",
+      "Username": "postgres",
+      "SSLMode": "prefer",
+      "PassFile": "/tmp/pgpassfile"
+    }
+  }
+}

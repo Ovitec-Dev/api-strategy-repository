@@ -1,5 +1,5 @@
-import { Strategy, StrategyStatus } from '@/entities/Strategy';
-import { StrategyRule } from '@/entities/StrategyRule';
+import { Strategy, StrategyStatus } from '../modules/strategy/entities/strategy.entity';
+import { StrategyRule } from '../modules/strategy/entities/strategy-rule.entity';
 import { CreateStrategyDto, UpdateStrategyDto } from '@/dtos/CreateStrategyDto';
 import { ValidationResultDto, BacktestResultDto } from '@/dtos/ValidationResultDto';
 
@@ -25,19 +25,18 @@ export class StrategyMapper {
       strategy_rules: entity.strategy_rules?.map(rule => ({
         id: rule.id,
         rule_id: rule.rule_id,
-        parameters: rule.parameters,
-        assigned_at: rule.assigned_at
+        parameters: rule.parameters
       }))
     };
   }
 
   static toUpdateEntity(dto: UpdateStrategyDto): Partial<Strategy> {
     const updateData: Partial<Strategy> = {};
-    
+
     if (dto.name !== undefined) updateData.name = dto.name;
     if (dto.description !== undefined) updateData.description = dto.description;
     if (dto.status !== undefined) updateData.status = dto.status as StrategyStatus;
-    
+
     return updateData;
   }
 
@@ -68,4 +67,4 @@ export class StrategyMapper {
       tested_at: data.tested_at ? new Date(data.tested_at) : new Date()
     };
   }
-} 
+}

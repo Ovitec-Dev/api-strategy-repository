@@ -1,0 +1,61 @@
+# Guía de Ingesta Manual (CURL)
+
+Este archivo contiene los pasos para cargar la estrategia "70/30 Balance Óptimo" de forma manual usando CURL.
+
+## 1. Autenticación
+Primero, obtén el Access Token:
+
+```bash
+curl -X POST http://localhost:4000/api/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{
+       "email": "user@example.com",
+       "password": "password123"
+     }'
+```
+(Copia el "accessToken" de la respuesta)
+
+## 2. Obtener ID de Usuario
+Necesitas tu UUID para crear la estrategia:
+
+```bash
+curl -X GET http://localhost:4000/api/auth/me \
+     -H "Authorization: Bearer <TU_ACCESS_TOKEN>"
+```
+(Copia el "id" de la respuesta)
+
+## 3. Crear Estrategia
+Sustituye `<TU_USER_ID>` por tu UUID obtenido:
+
+```bash
+curl -X POST http://localhost:4000/api/strategies \
+     -H "Authorization: Bearer <TU_ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "name": "70/30 Balance Óptimo - IOL Compatible",
+       "description": "Balance entre ingresos por dividendos y crecimiento tecnológico. 100% CEDEARs disponibles en IOL (bCBA).",
+       "user_id": "<TU_USER_ID>",
+       "config": {
+         "strategy_info": { "monthly_budget_ars": 300000, "currency": "ARS" },
+         "rebalance_rules": { "review_frequency": "quarterly" },
+         "monthly_schedule": [
+            { "month": 1, "orders": [{"ticker": "VIG", "amount_ars": 120000}, {"ticker": "MSFT", "amount_ars": 90000}] },
+            { "month": 2, "orders": [{"ticker": "SPY", "amount_ars": 120000}, {"ticker": "NVDA", "amount_ars": 90000}] }
+         ]
+       }
+     }'
+```
+(Copia el "id" de la estrategia creada)
+
+## 4. Activar Schedule (Opcional)
+Para que el sistema ejecute la estrategia automáticamente cada mes:
+
+```bash
+curl -X POST http://localhost:4000/api/strategies/<ID_ESTRATEGIA>/schedule \
+     -H "Authorization: Bearer <TU_ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "cronExpression": "0 9 1 * *",
+       "isActive": true
+     }'
+```

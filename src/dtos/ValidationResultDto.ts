@@ -1,38 +1,105 @@
-import { z } from 'zod';
+import { IsBoolean, IsOptional, IsUUID, IsArray, IsNumber, IsString, ValidateNested, IsObject, IsDate } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-export const ValidationResultSchema = z.object({
-  strategy_id: z.string().uuid('El strategy_id debe ser un UUID válido'),
-  is_valid: z.boolean(),
-  validation_messages: z.array(z.string()).optional(),
-  risk_assessment: z.record(z.any()).optional(),
-  validated_at: z.date().optional()
-});
+export class ValidationResultDto {
+  @ApiProperty({ description: 'UUID de la estrategia validada' })
+  @IsUUID()
+  strategy_id: string;
 
-export type ValidationResultDto = z.infer<typeof ValidationResultSchema>;
+  @ApiProperty({ description: 'Si la estrategia es válida' })
+  @IsBoolean()
+  is_valid: boolean;
 
-export const BacktestResultSchema = z.object({
-  strategy_id: z.string().uuid(),
-  user_id: z.string().uuid(),
-  performance_metrics: z.object({
-    total_return: z.number(),
-    sharpe_ratio: z.number(),
-    max_drawdown: z.number(),
-    win_rate: z.number(),
-    total_trades: z.number(),
-    profitable_trades: z.number()
-  }),
-  trade_log: z.array(z.record(z.any())),
-  tested_at: z.date().optional()
-});
+  @ApiPropertyOptional({ description: 'Mensajes de validación', type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  validation_messages?: string[];
 
-export type BacktestResultDto = z.infer<typeof BacktestResultSchema>;
+  @ApiPropertyOptional({ description: 'Evaluación de riesgo' })
+  @IsOptional()
+  @IsObject()
+  risk_assessment?: Record<string, any>;
 
-export const EventMessageSchema = z.object({
-  event_id: z.string().uuid(),
-  event_type: z.string(),
-  timestamp: z.date(),
-  data: z.record(z.any()),
-  metadata: z.record(z.any()).optional()
-});
+  @ApiPropertyOptional({ description: 'Fecha de validación' })
+  @IsOptional()
+  @IsDate()
+  @Type(() => Date)
+  validated_at?: Date;
+}
 
-export type EventMessageDto = z.infer<typeof EventMessageSchema>; 
+export class PerformanceMetricsDto {
+  @ApiProperty({ example: 0.15 })
+  @IsNumber()
+  total_return: number;
+
+  @ApiProperty({ example: 1.5 })
+  @IsNumber()
+  sharpe_ratio: number;
+
+  @ApiProperty({ example: -0.08 })
+  @IsNumber()
+  max_drawdown: number;
+
+  @ApiProperty({ example: 0.65 })
+  @IsNumber()
+  win_rate: number;
+
+  @ApiProperty({ example: 100 })
+  @IsNumber()
+  total_trades: number;
+
+  @ApiProperty({ example: 65 })
+  @IsNumber()
+  profitable_trades: number;
+}
+
+export class BacktestResultDto {
+  @ApiProperty({ description: 'UUID de la estrategia' })
+  @IsUUID()
+  strategy_id: string;
+
+  @ApiProperty({ description: 'UUID del usuario' })
+  @IsUUID()
+  user_id: string;
+
+  @ApiProperty({ type: PerformanceMetricsDto, description: 'Métricas de performance' })
+  @ValidateNested()
+  @Type(() => PerformanceMetricsDto)
+  performance_metrics: PerformanceMetricsDto;
+
+  @ApiProperty({ description: 'Log de trades ejecutados' })
+  @IsArray()
+  trade_log: Record<string, any>[];
+
+  @ApiPropertyOptional({ description: 'Fecha del backtest' })
+  @IsOptional()
+  @IsDate()
+  @Type(() => Date)
+  tested_at?: Date;
+}
+
+export class EventMessageDto {
+  @ApiProperty({ description: 'UUID del evento' })
+  @IsUUID()
+  event_id: string;
+
+  @ApiProperty({ description: 'Tipo de evento' })
+  @IsString()
+  event_type: string;
+
+  @ApiProperty({ description: 'Timestamp' })
+  @IsDate()
+  @Type(() => Date)
+  timestamp: Date;
+
+  @ApiProperty({ description: 'Datos del evento' })
+  @IsObject()
+  data: Record<string, any>;
+
+  @ApiPropertyOptional({ description: 'Metadata adicional' })
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, any>;
+}

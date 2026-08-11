@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # PostgreSQL Database
+  # PostgreSQL Database con pgAdmin
   postgres:
     image: postgres:13-alpine
     container_name: strategy_repository_postgres
@@ -9,6 +9,7 @@ services:
       POSTGRES_DB: strategy_repository
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
     ports:
       - "5432:5432"
     volumes:
@@ -21,8 +22,29 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: unless-stopped
 
-  # RabbitMQ Message Broker
+  # pgAdmin - Interfaz web para PostgreSQL
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: strategy_repository_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@strategy.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin-servers.json:/pgadmin4/servers.json
+    networks:
+      - strategy_network
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # RabbitMQ con Management UI
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: strategy_repository_rabbitmq
@@ -30,11 +52,15 @@ services:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
       RABBITMQ_DEFAULT_VHOST: /
+      # Configuraciones adicionales
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit log_levels [{connection,error},{default,info}]"
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "5672:5672"   # Puerto AMQP
+      - "15672:15672" # Puerto Management UI
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq-definitions.json:/etc/rabbitmq/definitions.json:ro
     networks:
       - strategy_network
     healthcheck:
@@ -42,12 +68,49 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: unless-stopped
+
+  # Redis con RedisInsight
+  redis:
+    image: redis:7-alpine
+    container_name: strategy_repository_redis
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfilename "appendonly.aof"
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - strategy_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # RedisInsight - Interfaz web para Redis
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: strategy_repository_redisinsight
+    ports:
+      - "5540:5540"
+    volumes:
+      - redisinsight_data:/data
+    networks:
+      - strategy_network
+    depends_on:
+      - redis
+    restart: unless-stopped
 
   # Strategy Repository API
   strategy-repository:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: strategy-repository-api:latest
     container_name: strategy_repository_api
     environment:
       # Database Configuration
@@ -61,6 +124,12 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
       RABBITMQ_EXCHANGE: trading_events
       RABBITMQ_QUEUE_PREFIX: strategy_repository
+      
+      # Redis Configuration
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_TTL: 3600
       
       # Application Configuration
       NODE_ENV: production
@@ -83,13 +152,15 @@ services:
       RATE_LIMIT_WINDOW_MS: 900000
       RATE_LIMIT_MAX_REQUESTS: 100
     ports:
-      - "3000:3000"
+      - "4000:3000"
     volumes:
       - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - strategy_network
@@ -100,30 +171,18 @@ services:
       timeout: 10s
       retries: 3
 
-  # Redis Cache (Optional)
-  redis:
-    image: redis:7-alpine
-    container_name: strategy_repository_redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - strategy_network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
 volumes:
   postgres_data:
+    driver: local
+  pgadmin_data:
     driver: local
   rabbitmq_data:
     driver: local
   redis_data:
     driver: local
+  redisinsight_data:
+    driver: local
 
 networks:
   strategy_network:
-    driver: bridge 
+    driver: bridge

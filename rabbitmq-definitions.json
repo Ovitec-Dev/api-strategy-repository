@@ -1,0 +1,9 @@
+{
+  "exchanges": [
+    {
+      "name": "trading_events",
+      "type": "topic",
+      "durable": true
+    }
+  ]
+}
