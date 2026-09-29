@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsUUID, IsArray, IsNumber, IsString, ValidateNested, IsObject, IsDate } from 'class-validator';
+import { IsBoolean, IsOptional, IsUUID, IsArray, IsNumber, IsString, ValidateNested, IsObject, IsDate, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -38,8 +38,9 @@ export class PerformanceMetricsDto {
   @IsNumber()
   sharpe_ratio: number;
 
-  @ApiProperty({ example: -0.08 })
+  @ApiProperty({ example: 0.08, description: 'Positive fraction (absolute value of max drawdown)' })
   @IsNumber()
+  @Min(0)
   max_drawdown: number;
 
   @ApiProperty({ example: 0.65 })

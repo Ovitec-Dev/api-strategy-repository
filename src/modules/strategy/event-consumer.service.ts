@@ -25,6 +25,7 @@ export class EventConsumerService implements OnModuleInit {
       await this.messageBroker.subscribeToEvent('strategy.failed', this.handleStrategyFailed.bind(this));
       await this.messageBroker.subscribeToEvent('backtest.failed', this.handleBacktestFailed.bind(this));
       await this.messageBroker.subscribeToEvent('evaluation.completed', this.handleEvaluationCompleted.bind(this));
+      await this.messageBroker.subscribeToEvent('evaluation.skipped', this.handleEvaluationSkipped.bind(this));
 
       this.logger.log('✅ Event consumer initialized — listening on all strategy queues');
     } catch (error) {
@@ -33,9 +34,24 @@ export class EventConsumerService implements OnModuleInit {
     }
   }
 
+  private async guard(eventId: string, eventType: string): Promise<boolean> {
+    if (await this.strategyRepository.isEventProcessed(eventId)) {
+      this.logger.log(`Duplicate event skipped: ${eventId} (${eventType})`);
+      return true;
+    }
+    return false;
+  }
+
   private async handleStrategyValidated(message: any): Promise<void> {
     try {
+      if (await this.guard(message.event_id, message.event_type)) return;
+
       const eventData = message.data;
+      const schemaVersion = message.metadata?.schema_version;
+      if (schemaVersion && schemaVersion !== '1') {
+        this.logger.warn(`Schema version mismatch on strategy.validated: ${schemaVersion}`);
+      }
+
       const validationResult: ValidationResultDto = {
         strategy_id: eventData.strategy_id,
         is_valid: true,
@@ -44,6 +60,7 @@ export class EventConsumerService implements OnModuleInit {
         validated_at: new Date(),
       };
       await this.strategyRepository.handleValidationResult(validationResult);
+      await this.strategyRepository.markEventProcessed(message.event_id, message.event_type);
       this.logger.log(`strategy.validated handled for ${eventData.strategy_id}`);
     } catch (error) {
       this.logger.error('Error handling strategy.validated:', error);
@@ -52,7 +69,14 @@ export class EventConsumerService implements OnModuleInit {
 
   private async handleStrategyInvalidated(message: any): Promise<void> {
     try {
+      if (await this.guard(message.event_id, message.event_type)) return;
+
       const eventData = message.data;
+      const schemaVersion = message.metadata?.schema_version;
+      if (schemaVersion && schemaVersion !== '1') {
+        this.logger.warn(`Schema version mismatch on strategy.invalidated: ${schemaVersion}`);
+      }
+
       const validationResult: ValidationResultDto = {
         strategy_id: eventData.strategy_id,
         is_valid: false,
@@ -61,6 +85,7 @@ export class EventConsumerService implements OnModuleInit {
         validated_at: new Date(),
       };
       await this.strategyRepository.handleValidationResult(validationResult);
+      await this.strategyRepository.markEventProcessed(message.event_id, message.event_type);
       this.logger.log(`strategy.invalidated handled for ${eventData.strategy_id}`);
     } catch (error) {
       this.logger.error('Error handling strategy.invalidated:', error);
@@ -69,7 +94,14 @@ export class EventConsumerService implements OnModuleInit {
 
   private async handleBacktestCompleted(message: any): Promise<void> {
     try {
+      if (await this.guard(message.event_id, message.event_type)) return;
+
       const eventData = message.data;
+      const schemaVersion = message.metadata?.schema_version;
+      if (schemaVersion && schemaVersion !== '1') {
+        this.logger.warn(`Schema version mismatch on backtest.completed: ${schemaVersion}`);
+      }
+
       const backtestResult: BacktestResultDto = {
         strategy_id: eventData.strategy_id,
         user_id: eventData.user_id,
@@ -78,6 +110,7 @@ export class EventConsumerService implements OnModuleInit {
         tested_at: new Date(),
       };
       await this.strategyRepository.handleBacktestResult(backtestResult);
+      await this.strategyRepository.markEventProcessed(message.event_id, message.event_type);
       this.logger.log(`backtest.completed handled for ${eventData.strategy_id}`);
     } catch (error) {
       this.logger.error('Error handling backtest.completed:', error);
@@ -86,13 +119,21 @@ export class EventConsumerService implements OnModuleInit {
 
   private async handleStrategyFailed(message: any): Promise<void> {
     try {
+      if (await this.guard(message.event_id, message.event_type)) return;
+
       const eventData = message.data;
-      await this.strategyRepository.updateStrategyStatus(eventData.strategy_id, 'failed');
+      const schemaVersion = message.metadata?.schema_version;
+      if (schemaVersion && schemaVersion !== '1') {
+        this.logger.warn(`Schema version mismatch on strategy.failed: ${schemaVersion}`);
+      }
+
+      await this.strategyRepository.updateStrategyStatus(eventData.strategy_id, 'FAILED');
       await this.strategyRepository.logEvent(eventData.strategy_id, 'strategy.failed', {
         strategy_id: eventData.strategy_id,
         error: eventData.error,
         timestamp: new Date(),
       });
+      await this.strategyRepository.markEventProcessed(message.event_id, message.event_type);
       this.logger.log(`strategy.failed handled for ${eventData.strategy_id}`);
     } catch (error) {
       this.logger.error('Error handling strategy.failed:', error);
@@ -101,13 +142,21 @@ export class EventConsumerService implements OnModuleInit {
 
   private async handleBacktestFailed(message: any): Promise<void> {
     try {
+      if (await this.guard(message.event_id, message.event_type)) return;
+
       const eventData = message.data;
-      await this.strategyRepository.updateStrategyStatus(eventData.strategy_id, 'failed');
+      const schemaVersion = message.metadata?.schema_version;
+      if (schemaVersion && schemaVersion !== '1') {
+        this.logger.warn(`Schema version mismatch on backtest.failed: ${schemaVersion}`);
+      }
+
+      await this.strategyRepository.updateStrategyStatus(eventData.strategy_id, 'FAILED');
       await this.strategyRepository.logEvent(eventData.strategy_id, 'backtest.failed', {
         strategy_id: eventData.strategy_id,
         error: eventData.error,
         timestamp: new Date(),
       });
+      await this.strategyRepository.markEventProcessed(message.event_id, message.event_type);
       this.logger.log(`backtest.failed handled for ${eventData.strategy_id}`);
     } catch (error) {
       this.logger.error('Error handling backtest.failed:', error);
@@ -116,7 +165,15 @@ export class EventConsumerService implements OnModuleInit {
 
   private async handleEvaluationCompleted(message: any): Promise<void> {
     try {
+      if (await this.guard(message.event_id, message.event_type)) return;
+
       const eventData = message.data;
+      const schemaVersion = message.metadata?.schema_version;
+      if (schemaVersion && schemaVersion !== '1') {
+        this.logger.warn(`Schema version mismatch on evaluation.completed: ${schemaVersion}`);
+      }
+
+      await this.strategyRepository.updateStrategyStatus(eventData.strategy_id, 'EVALUATED');
       await this.strategyRepository.logEvent(eventData.strategy_id, 'evaluation.completed', {
         strategy_id: eventData.strategy_id,
         ai_score: eventData.ai_score,
@@ -125,9 +182,33 @@ export class EventConsumerService implements OnModuleInit {
         confidence: eventData.confidence,
         timestamp: new Date(),
       });
+      await this.strategyRepository.markEventProcessed(message.event_id, message.event_type);
       this.logger.log(`evaluation.completed handled for ${eventData.strategy_id}`);
     } catch (error) {
       this.logger.error('Error handling evaluation.completed:', error);
+    }
+  }
+
+  private async handleEvaluationSkipped(message: any): Promise<void> {
+    try {
+      if (await this.guard(message.event_id, message.event_type)) return;
+
+      const eventData = message.data;
+      const schemaVersion = message.metadata?.schema_version;
+      if (schemaVersion && schemaVersion !== '1') {
+        this.logger.warn(`Schema version mismatch on evaluation.skipped: ${schemaVersion}`);
+      }
+
+      await this.strategyRepository.updateStrategyStatus(eventData.strategy_id, 'SKIPPED');
+      await this.strategyRepository.logEvent(eventData.strategy_id, 'evaluation.skipped', {
+        strategy_id: eventData.strategy_id,
+        reason: eventData.reason || 'Evaluation skipped by pipeline',
+        timestamp: new Date(),
+      });
+      await this.strategyRepository.markEventProcessed(message.event_id, message.event_type);
+      this.logger.log(`evaluation.skipped handled for ${eventData.strategy_id}`);
+    } catch (error) {
+      this.logger.error('Error handling evaluation.skipped:', error);
     }
   }
 }

@@ -1,0 +1,295 @@
+name: Build on Merge to Dev
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: dev
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube Analysis
+        uses: SonarSource/sonarqube-scan-action@v4
+        continue-on-error: true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Set up environment variables
+        run: |
+          echo "AZURE_CONTAINER_REGISTRY=${{ vars.AZURE_CONTAINER_REGISTRY }}" >> $GITHUB_ENV
+          echo "AZURE_RESOURCE_GROUP=${{ vars.AZURE_RESOURCE_GROUP }}" >> $GITHUB_ENV
+          echo "IMAGE_NAME=verifeye-api" >> $GITHUB_ENV
+          echo "DEV_TAG=dev-latest" >> $GITHUB_ENV
+
+      - name: Export AZURE_SUBSCRIPTION_ID as env var
+        run: echo "AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+        
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Container Apps extension
+        run: |
+          echo "🔧 Installing Container Apps extension..."
+          az extension add --name containerapp --upgrade
+
+      - name: Login to Azure Container Registry
+        run: |
+          if [ -z "$AZURE_CONTAINER_REGISTRY" ]; then
+            echo "❌ Container registry not configured"
+            exit 1
+          fi
+          
+          echo "🔐 Logging into Container Registry: $AZURE_CONTAINER_REGISTRY"
+          az acr login --name "$AZURE_CONTAINER_REGISTRY"
+
+      - name: Build and push dev-latest image
+        run: |
+          
+          # Check if Dockerfile exists
+          if [[ ! -f "Dockerfile" ]]; then
+            echo "❌ Dockerfile not found"
+            exit 1
+          fi
+          
+          # Build image with dev-latest tag (overwrites previous)
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+          FULL_IMAGE_NAME="${REGISTRY_URL}/${IMAGE_NAME}:${DEV_TAG}"
+          
+          echo "🔨 Building Docker image..."
+          echo "   Image: $FULL_IMAGE_NAME"
+          echo "   This will overwrite the previous dev-latest image"
+          
+          docker build -t "$FULL_IMAGE_NAME" .
+          
+          echo "🚀 Pushing image to registry..."
+          docker push "$FULL_IMAGE_NAME"
+          
+          echo "✅ Dev image updated: $FULL_IMAGE_NAME"
+
+      - name: Debug - Complete Azure Environment Check
+        run: |
+          echo "=================================================="
+          echo "🔍 COMPLETE AZURE ENVIRONMENT DEBUG"
+          echo "=================================================="
+          
+          # 1. Azure CLI Authentication Status
+          echo "1️⃣ AZURE AUTHENTICATION:"
+          CURRENT_ACCOUNT=$(az account show --query "user.name" -o tsv 2>/dev/null || echo "Not authenticated")
+          CURRENT_SUB=$(az account show --query "id" -o tsv 2>/dev/null || echo "No subscription")
+          echo "   Account: $CURRENT_ACCOUNT"
+          echo "   Active Subscription: $CURRENT_SUB"
+          echo "   Expected Subscription: $AZURE_SUBSCRIPTION_ID"
+          if [ "$CURRENT_SUB" = "$AZURE_SUBSCRIPTION_ID" ]; then
+            echo "   ✅ Subscription matches"
+          else
+            echo "   ❌ Subscription mismatch!"
+          fi
+          echo ""
+          
+          # 2. Resource Group Verification
+          echo "2️⃣ RESOURCE GROUP CHECK:"
+          echo "   Target RG: $AZURE_RESOURCE_GROUP"
+          if az group show --name "$AZURE_RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" &>/dev/null; then
+            RG_LOCATION=$(az group show --name "$AZURE_RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" --query "location" -o tsv)
+            echo "   ✅ Resource Group exists in location: $RG_LOCATION"
+          else
+            echo "   ❌ Resource Group does not exist or no access"
+            echo "   Available Resource Groups:"
+            az group list --subscription "$AZURE_SUBSCRIPTION_ID" --query "[].name" -o tsv 2>/dev/null | head -5 || echo "   Cannot list resource groups"
+          fi
+          echo ""
+          
+          # 3. Container Apps Extension
+          echo "3️⃣ CONTAINER APPS CAPABILITY:"
+          if az extension show --name containerapp &>/dev/null; then
+            echo "   ✅ Container Apps extension installed"
+          else
+            echo "   ❌ Container Apps extension missing"
+          fi
+          echo ""
+          
+          # 4. Container Apps Environment Check
+          echo "4️⃣ CONTAINER APPS ENVIRONMENTS:"
+          ENVS=$(az containerapp env list --resource-group "$AZURE_RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" --query "[].name" -o tsv 2>/dev/null)
+          if [ -n "$ENVS" ]; then
+            echo "   ✅ Container Apps Environments found:"
+            echo "$ENVS" | head -3
+          else
+            echo "   ❌ No Container Apps Environments found"
+            echo "   💡 Container Apps need an Environment to exist"
+          fi
+          echo ""
+          
+          # 5. Target Container App Check
+          echo "5️⃣ TARGET CONTAINER APP:"
+          CONTAINER_APP="verifeye-api-dev"
+          echo "   Looking for: $CONTAINER_APP"
+          
+          if az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --query "name" -o tsv &>/dev/null; then
+            echo "   ✅ SUCCESS: Container App exists and accessible"
+            APP_STATUS=$(az containerapp show --name "$CONTAINER_APP" --resource-group "$AZURE_RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" --query "properties.provisioningState" -o tsv)
+            echo "   Status: $APP_STATUS"
+          else
+            echo "   ❌ Container App not found in target resource group"
+            
+            # Check all resource groups
+            echo ""
+            echo "   🔍 Searching ALL resource groups for '$CONTAINER_APP':"
+            ALL_APPS=$(az containerapp list --subscription "$AZURE_SUBSCRIPTION_ID" --query "[?name=='$CONTAINER_APP'].{Name:name, ResourceGroup:resourceGroup, Location:location}" -o tsv 2>/dev/null)
+            
+            if [ -n "$ALL_APPS" ]; then
+              echo "   ✅ FOUND in different resource group:"
+              echo "$ALL_APPS"
+            else
+              echo "   ❌ Container App does not exist anywhere"
+              echo ""
+              echo "   📋 All Container Apps in subscription (first 10):"
+              az containerapp list --subscription "$AZURE_SUBSCRIPTION_ID" --query "[].{Name:name, ResourceGroup:resourceGroup}" -o tsv 2>/dev/null | head -10 || echo "   Cannot list container apps"
+            fi
+          fi
+          
+          echo ""
+          echo "=================================================="
+          echo "🚨 SUMMARY:"
+          echo "   If Container App not found, you need to:"
+          echo "   1. Create Container App Environment first"
+          echo "   2. Create Container App 'verifeye-api-dev'"
+          echo "   3. Or update AZURE_RESOURCE_GROUP variable"
+          echo "=================================================="
+
+      - name: Deploy to DEV environment
+        run: |
+          CONTAINER_APP="verifeye-api-dev"
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+          IMAGE_FULL_NAME="${REGISTRY_URL}/${IMAGE_NAME}:${DEV_TAG}"
+          
+          echo "🚀 Auto-deploying to DEV environment"
+          echo "   Container App: $CONTAINER_APP"
+          echo "   Image: $IMAGE_FULL_NAME"
+          
+          # Check current Container App configuration
+          echo "🔍 Current Container App status..."
+          az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --query "{status: properties.provisioningState, image: properties.template.containers[0].image}" \
+            --output table
+          
+          # Get image digest to force pull (avoids cache issues)
+          echo "🔍 Getting image digest from registry..."
+          DIGEST=$(az acr repository show \
+            --name "$AZURE_CONTAINER_REGISTRY" \
+            --image "${IMAGE_NAME}:${DEV_TAG}" \
+            --query digest -o tsv)
+
+          echo "   Digest: $DIGEST"
+
+          # Update using digest instead of tag (guarantees fresh pull)
+          IMAGE_WITH_DIGEST="${REGISTRY_URL}/${IMAGE_NAME}@${DIGEST}"
+          echo "🔄 Updating Container App with digest..."
+          echo "   Image: $IMAGE_WITH_DIGEST"
+
+          az containerapp update \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --image "$IMAGE_WITH_DIGEST"
+
+          echo "✅ Image update completed (using digest to avoid cache)"
+          
+          # Show updated status
+          echo "📊 Updated Container App status..."
+          az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --query "{status: properties.provisioningState, image: properties.template.containers[0].image}" \
+            --output table
+          
+          echo "✅ DEV deployment completed"
+
+      - name: Post-deployment verification
+        run: |
+          CONTAINER_APP="verifeye-api-dev"
+          
+          # Wait for deployment to be ready
+          echo "⏳ Waiting for deployment to complete..."
+          sleep 30
+          
+          # Get Container App URL
+          API_URL=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          
+          if [ -n "$API_URL" ]; then
+            HEALTH_URL="https://$API_URL/health"
+            
+            echo "🔍 Testing DEV deployment..."
+            echo "   API URL: https://$API_URL"
+            echo "   Health URL: $HEALTH_URL"
+            
+            # Test health endpoint
+            if curl -f -s "$HEALTH_URL" > /dev/null; then
+              echo "✅ DEV health check passed"
+            else
+              echo "⚠️  DEV health check failed (may still be starting)"
+            fi
+          else
+            echo "⚠️  Could not get DEV Container App URL"
+          fi
+
+      - name: Summary
+        run: |
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+          CONTAINER_APP="verifeye-api-dev"
+          
+          # Get Container App URL
+          API_URL=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          
+          echo "✅ Build and DEV deployment completed!"
+          echo ""
+          echo "📋 Build Details:"
+          echo "   Branch: ${{ github.ref_name }}"
+          echo "   Commit: ${{ github.sha }}"
+          echo "   Registry: ${REGISTRY_URL}"
+          echo "   Image: ${REGISTRY_URL}/${IMAGE_NAME}:${DEV_TAG}"
+          echo ""
+          echo "🌐 DEV Environment:"
+          echo "   API: https://$API_URL"
+          echo "   Health: https://$API_URL/health"
+          echo "   Swagger: https://$API_URL/swagger"
+          echo ""
+          echo "🚀 Next steps:"
+          echo "   1. Test the DEV environment thoroughly"
+          echo "   2. Create PR: dev → main"
+          echo "   3. After merge to main, run 'Build Release Version' workflow"
+          echo "   4. Then use 'Promote to Environment' for QA/STAGE/PROD"
+          echo ""
+          echo "📝 Note: This builds dev-latest for DEV testing only"
+          echo "         Production builds happen from main branch"

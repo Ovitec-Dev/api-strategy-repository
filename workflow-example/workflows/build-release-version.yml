@@ -1,0 +1,242 @@
+name: Build Release Version
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: dev
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for version suggestions
+
+
+      - name: Determine version automatically
+        run: |
+          echo "🔍 Determining next version..."
+          
+          # Buscar último tag de versión
+          LATEST_TAG=$(git tag -l "v*.*.*" | sort -V | tail -1)
+          
+          if [ -z "$LATEST_TAG" ]; then
+            echo "💡 No previous versions found, starting with v1.0.0"
+            NEW_VERSION="v1.0.0"
+          else
+            echo "🏷️  Current latest version: $LATEST_TAG"
+            
+            # Extraer números de versión
+            VERSION=${LATEST_TAG#v}  # Remove 'v' prefix
+            IFS='.' read -ra PARTS <<< "$VERSION"
+            MAJOR=${PARTS[0]}
+            MINOR=${PARTS[1]}
+            PATCH=${PARTS[2]}
+            
+            # Incrementar PATCH
+            NEW_PATCH=$((PATCH + 1))
+            NEW_VERSION="v$MAJOR.$MINOR.$NEW_PATCH"
+            echo "🔧 Incrementing PATCH version"
+          fi
+          
+          echo "✅ New version determined: $NEW_VERSION"
+          echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
+
+      - name: Validate version format
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Invalid version format generated: $VERSION"
+            exit 1
+          fi
+          echo "✅ Version format valid: $VERSION"
+
+      - name: Check if version already exists
+        run: |
+          if git tag -l | grep -q "^$VERSION$"; then
+            echo "❌ Version $VERSION already exists"
+            echo "   This shouldn't happen with automatic versioning"
+            exit 1
+          fi
+          echo "✅ Version $VERSION is available"
+
+      - name: Set up environment variables
+        run: |
+          echo "AZURE_CONTAINER_REGISTRY=${{ vars.AZURE_CONTAINER_REGISTRY }}" >> $GITHUB_ENV
+          echo "IMAGE_NAME=verifeye-api" >> $GITHUB_ENV
+
+      - name: Export AZURE_SUBSCRIPTION_ID as env var
+        run: echo "AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to Azure Container Registry
+        run: |
+          if [ -z "$AZURE_CONTAINER_REGISTRY" ]; then
+            echo "❌ Container registry not configured"
+            exit 1
+          fi
+          
+          echo "🔐 Logging into Container Registry: $AZURE_CONTAINER_REGISTRY"
+          az acr login --name "$AZURE_CONTAINER_REGISTRY"
+
+      - name: Build and push release image
+        run: |
+          
+          # Check if Dockerfile exists
+          if [[ ! -f "Dockerfile" ]]; then
+            echo "❌ Dockerfile not found"
+            exit 1
+          fi
+          
+          # Build image with version tag
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+          VERSIONED_IMAGE="${REGISTRY_URL}/${IMAGE_NAME}:${VERSION}"
+          LATEST_IMAGE="${REGISTRY_URL}/${IMAGE_NAME}:latest"
+          
+          echo "🔨 Building release image from main..."
+          echo "   Version: $VERSION (auto-generated)"
+          echo "   Image: $VERSIONED_IMAGE"
+          echo "   Branch: ${{ github.ref_name }}"
+          echo "   Commit: ${{ github.sha }}"
+          
+          # Build image
+          docker build -t "$VERSIONED_IMAGE" .
+          docker tag "$VERSIONED_IMAGE" "$LATEST_IMAGE"
+          
+          echo "🚀 Pushing release image..."
+          docker push "$VERSIONED_IMAGE"
+          docker push "$LATEST_IMAGE"
+          
+          echo "✅ Release image built and pushed:"
+          echo "   $VERSIONED_IMAGE"
+          echo "   $LATEST_IMAGE"
+
+      - name: Create Git tag
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          echo "🏷️  Creating Git tag: $VERSION"
+          git tag -a "$VERSION" -m "Release $VERSION built from main"
+          git push origin "$VERSION"
+          
+          echo "✅ Git tag created and pushed"
+
+      - name: Cleanup old release versions
+        run: |
+          echo "🧹 Cleaning up old release versions..."
+          echo "   Keeping: latest, dev-latest, and last 2 versioned releases"
+          echo ""
+
+          # Get all version tags (v*.*.*)
+          ALL_VERSIONS=$(az acr repository show-tags \
+            --name "$AZURE_CONTAINER_REGISTRY" \
+            --repository "$IMAGE_NAME" \
+            --orderby time_desc \
+            --output tsv | grep "^v[0-9]")
+
+          if [ -z "$ALL_VERSIONS" ]; then
+            echo "⚠️  No versioned images found in registry"
+            exit 0
+          fi
+
+          VERSION_COUNT=$(echo "$ALL_VERSIONS" | wc -l)
+          echo "📊 Total versioned images found: $VERSION_COUNT"
+
+          if [ "$VERSION_COUNT" -le 2 ]; then
+            echo "✅ Only $VERSION_COUNT version(s) exist, no cleanup needed"
+          else
+            # Keep first 2 (current + previous for rollback)
+            TO_DELETE=$(echo "$ALL_VERSIONS" | tail -n +3)
+            DELETE_COUNT=$(echo "$TO_DELETE" | wc -l)
+
+            echo "🗑️  Deleting $DELETE_COUNT old version(s) (keeping last 2):"
+            while IFS= read -r tag; do
+              echo "   - Deleting: $tag"
+              az acr repository delete \
+                --name "$AZURE_CONTAINER_REGISTRY" \
+                --image "${IMAGE_NAME}:${tag}" \
+                --yes 2>/dev/null || echo "     ⚠️  Failed to delete $tag (may not exist)"
+            done <<< "$TO_DELETE"
+
+            echo "✅ Cleanup completed"
+          fi
+
+          # Show what's left
+          echo ""
+          echo "📋 Remaining images in registry:"
+          az acr repository show-tags \
+            --name "$AZURE_CONTAINER_REGISTRY" \
+            --repository "$IMAGE_NAME" \
+            --orderby time_desc \
+            --output table || echo "⚠️  Could not list remaining tags"
+
+      - name: Create build record
+        run: |
+          
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+          BUILD_RECORD="build-record-${{ env.VERSION }}.json"
+          
+          cat > "$BUILD_RECORD" << EOF
+          {
+            "version": "${{ env.VERSION }}",
+            "built_from": "main",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "built_by": "${{ github.actor }}",
+            "git_hash": "${{ github.sha }}",
+            "git_branch": "${{ github.ref_name }}",
+            "git_tag": "${{ env.VERSION }}",
+            "docker_image": {
+              "repository": "${REGISTRY_URL}/${IMAGE_NAME}",
+              "version_tag": "${{ env.VERSION }}",
+              "latest_tag": "latest",
+              "versioned_image": "${REGISTRY_URL}/${IMAGE_NAME}:${{ env.VERSION }}",
+              "latest_image": "${REGISTRY_URL}/${IMAGE_NAME}:latest"
+            },
+            "registry": {
+              "url": "${REGISTRY_URL}",
+              "name": "${AZURE_CONTAINER_REGISTRY}"
+            }
+          }
+          EOF
+          
+          echo "📄 Build record created: $BUILD_RECORD"
+          cat "$BUILD_RECORD"
+
+      - name: Summary
+        run: |
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+          
+          echo "✅ Release build completed successfully!"
+          echo ""
+          echo "📋 Build Details:"
+          echo "   Version: $VERSION (auto-generated)"
+          echo "   Built from: main branch"
+          echo "   Commit: ${{ github.sha }}"
+          echo "   Git tag: $VERSION (created)"
+          echo "   Registry: ${REGISTRY_URL}"
+          echo ""
+          echo "🏷️  Images created:"
+          echo "   Versioned: ${REGISTRY_URL}/${IMAGE_NAME}:$VERSION"
+          echo "   Latest: ${REGISTRY_URL}/${IMAGE_NAME}:latest"
+          echo ""
+          echo "🚀 Next steps:"
+          echo "   1. Go to Actions → Deploy to Environment"
+          echo "   2. Select target environment (QA/STAGE/PROD)"
+          echo "   3. Version $VERSION is now available for deployment"
+          echo ""
+          echo "📝 Note: Version increments PATCH automatically"
+          echo "         (Use manual MINOR/MAJOR increments when needed)"

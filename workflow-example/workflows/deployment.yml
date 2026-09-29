@@ -1,0 +1,93 @@
+name: Backend - Software Verify API
+run-name: '[TR-verify-api-develop] ${{ github.actor }} manual deploy to ${{ github.event.inputs.environment }}'
+env:
+  IMAGE_URL: ghcr.io/tecno-red-desarrollo/tr-verify-api-develop/${{ github.event.inputs.environment }}/verify-api:latest
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - main
+
+jobs:
+  
+  release-image:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Build Docker image
+        run: docker build -t ${{ env.IMAGE_URL }} .
+
+      - name: Publish Docker image
+        run: docker push ${{ env.IMAGE_URL }}
+
+  deploy-dev:
+    if: ${{ github.event.inputs.environment == 'dev' }}
+    needs: ["release-image"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: print out example job
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.DW_SSH_IP_VM }}
+          username: ${{ secrets.DW_SSH_USER }}
+          key: ${{ secrets.DW_SSH_PRIV_KEY}}
+          port: ${{ secrets.DW_SSH_PORT }}
+          command_timeout: 30m
+          script: |
+            cd TecnoRed-DevOps/Infrastructura && \
+            docker compose -f docker-compose.develop.yml pull verifeye_api_dev && \
+            scripts/start-dev.sh && \
+            docker image prune -af
+  deploy-test:
+    if: ${{ github.event.inputs.environment == 'test' }}
+    needs: ["release-image"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: print out example job
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.DW_SSH_IP_VM }}
+          username: ${{ secrets.DW_SSH_USER }}
+          key: ${{ secrets.DW_SSH_PRIV_KEY}}
+          port: ${{ secrets.DW_SSH_PORT }}
+          command_timeout: 30m
+          script: |
+            cd TecnoRed-DevOps/Infrastructura && \
+            docker compose -f docker-compose.testing.yml pull verifeye_api_test && \
+            scripts/start-test.sh && \
+            docker image prune -af
+
+  deploy-prod:
+    if: ${{ github.event.inputs.environment == 'main' }}
+    needs: ["release-image"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: print out example job
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.PROD_SSH_IP_VM }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          port: ${{ secrets.PROD_SSH_PORT }}
+          key: ${{ secrets.PROD_SSH_PRIV_KEY }}
+          command_timeout: 30m
+          script: |
+            sudo -u tecnored /bin/bash -c '
+            cd TecnoRed-DevOps/Infrastructura  && \
+            docker image prune -af && \
+            docker compose -f docker-compose.production.yml pull verifeye_api'

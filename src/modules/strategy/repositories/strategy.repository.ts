@@ -6,6 +6,7 @@ import { StrategyRule } from '../entities/strategy-rule.entity';
 import { EventLog } from '../entities/event-log.entity';
 import { BacktestResult } from '../entities/backtest-result.entity';
 import { Validation } from '../entities/validation.entity';
+import { ProcessedEvent } from '../entities/processed-event.entity';
 import { CreateStrategyDto, UpdateStrategyDto } from '@/dtos/CreateStrategyDto';
 import { ValidationResultDto, BacktestResultDto } from '@/dtos/ValidationResultDto';
 import { StrategyMapper } from '@/mappers/strategy.mapper';
@@ -26,6 +27,8 @@ export class StrategyRepository {
     private readonly backtestResultRepo: Repository<BacktestResult>,
     @InjectRepository(Validation)
     private readonly validationRepo: Repository<Validation>,
+    @InjectRepository(ProcessedEvent)
+    private readonly processedEventRepo: Repository<ProcessedEvent>,
     private readonly messageBroker: MessageBrokerService,
   ) { }
 
@@ -128,6 +131,7 @@ export class StrategyRepository {
 
   async publishStrategyRequested(strategy: Strategy): Promise<boolean> {
     try {
+      const config = strategy.config || {};
       const eventData = {
         strategy_id: strategy.id,
         user_id: strategy.user_id,
@@ -135,6 +139,10 @@ export class StrategyRepository {
         description: strategy.description,
         status: strategy.status,
         created_at: strategy.created_at,
+        strategy_type: config.strategy_type || null,
+        symbol: config.symbol || null,
+        timeframe: config.timeframe || null,
+        parameters: config.parameters || {},
       };
       const success = await this.messageBroker.publishEvent('strategy.requested', eventData);
       if (success) await this.logEvent(strategy.id, 'strategy.requested', eventData);
@@ -190,6 +198,30 @@ export class StrategyRepository {
       await this.eventLogRepo.save(eventLog);
     } catch (error) {
       this.logger.error('Error logging event:', error);
+    }
+  }
+
+  async isEventProcessed(eventId: string): Promise<boolean> {
+    try {
+      const count = await this.processedEventRepo.count({ where: { event_id: eventId } });
+      return count > 0;
+    } catch (error) {
+      this.logger.error('Error checking processed event:', error);
+      return false;
+    }
+  }
+
+  async markEventProcessed(eventId: string, eventType: string): Promise<void> {
+    try {
+      const entry = this.processedEventRepo.create({ event_id: eventId, event_type: eventType });
+      await this.processedEventRepo.save(entry);
+    } catch (error: any) {
+      if (error?.code === '23505') {
+        this.logger.warn(`Duplicate event_id ignored: ${eventId}`);
+        return;
+      }
+      this.logger.error('Error marking event as processed:', error);
+      throw error;
     }
   }
 

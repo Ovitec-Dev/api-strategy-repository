@@ -31,7 +31,9 @@ export enum StrategyStatus {
     VALIDATED = 'VALIDATED',
     INVALID = 'INVALID',
     TESTED = 'TESTED',
-    FAILED = 'FAILED'
+    FAILED = 'FAILED',
+    EVALUATED = 'EVALUATED',
+    SKIPPED = 'SKIPPED'
 }
 
 @Entity('strategies')

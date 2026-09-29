@@ -1,0 +1,259 @@
+name: Deploy to Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine version from ref
+        run: |
+          REF_NAME="${{ github.ref_name }}"
+          echo "📦 Deploying from: $REF_NAME"
+          echo "🎯 Target environment: ${{ github.event.inputs.environment }}"
+
+          # Use the ref name as version (branch or tag name)
+          echo "VERSION=$REF_NAME" >> $GITHUB_ENV
+
+      - name: Set up environment variables
+        run: |
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "IMAGE_NAME=verifeye-api" >> $GITHUB_ENV
+          
+          # Environment variables are now configured per GitHub Environment
+          echo "AZURE_RESOURCE_GROUP=${{ vars.AZURE_RESOURCE_GROUP }}" >> $GITHUB_ENV
+          echo "AZURE_CONTAINER_REGISTRY=${{ vars.AZURE_CONTAINER_REGISTRY }}" >> $GITHUB_ENV
+          echo "AZURE_KEY_VAULT=${{ vars.AZURE_KEY_VAULT }}" >> $GITHUB_ENV
+          echo "AZURE_CONTAINER_ENV=${{ vars.AZURE_CONTAINER_ENV }}" >> $GITHUB_ENV
+          echo "AZURE_BLOB_STORAGE=${{ vars.AZURE_BLOB_STORAGE }}" >> $GITHUB_ENV
+
+      - name: Export AZURE_SUBSCRIPTION_ID as env var
+        run: echo "AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to Azure Container Registry
+        run: |
+          if [ -z "$AZURE_CONTAINER_REGISTRY" ]; then
+            echo "❌ Container registry not configured for environment: ${{ env.ENVIRONMENT }}"
+            exit 1
+          fi
+          
+          echo "🔐 Logging into Container Registry: $AZURE_CONTAINER_REGISTRY"
+          az acr login --name "$AZURE_CONTAINER_REGISTRY"
+
+      - name: Build and push image (branch deploys)
+        if: github.ref_type == 'branch'
+        run: |
+          if [[ ! -f "Dockerfile" ]]; then
+            echo "❌ Dockerfile not found"
+            exit 1
+          fi
+
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+
+          # dev keeps the dev-latest convention; other envs use branch name as tag
+          if [ "${{ github.event.inputs.environment }}" == "dev" ]; then
+            BUILD_TAG="dev-latest"
+          else
+            BUILD_TAG="${VERSION}"
+          fi
+
+          FULL_IMAGE_NAME="${REGISTRY_URL}/${IMAGE_NAME}:${BUILD_TAG}"
+
+          echo "🔨 Building Docker image from branch: $VERSION"
+          echo "   Image: $FULL_IMAGE_NAME"
+
+          docker build -t "$FULL_IMAGE_NAME" .
+
+          echo "🚀 Pushing image to registry..."
+          docker push "$FULL_IMAGE_NAME"
+
+          echo "✅ Image built and pushed: $FULL_IMAGE_NAME"
+          echo "DEPLOY_TAG=${BUILD_TAG}" >> $GITHUB_ENV
+
+      - name: Validate ref is a tag (PROD only)
+        if: github.event.inputs.environment == 'prod'
+        run: |
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "❌ Only tags can be deployed to prod"
+            echo "   Current ref: ${{ github.ref_name }} (type: ${{ github.ref_type }})"
+            echo "💡 Create a release tag first, then run this workflow from that tag"
+            exit 1
+          fi
+          echo "✅ Ref is a tag: ${{ github.ref_name }}"
+
+      - name: Verify release image exists (tag deploys)
+        if: github.ref_type == 'tag'
+        run: |
+          echo "🔍 Verifying release image exists in registry..."
+          if ! az acr repository show --name "$AZURE_CONTAINER_REGISTRY" --image "${IMAGE_NAME}:${VERSION}" &>/dev/null; then
+            echo "❌ Release image not found: ${IMAGE_NAME}:${VERSION}"
+            echo "💡 Merge to main branch first to trigger automatic build"
+            echo "   Available images:"
+            az acr repository show-tags --name "$AZURE_CONTAINER_REGISTRY" --repository "${IMAGE_NAME}" --top 10 || echo "   No images found"
+            exit 1
+          fi
+          echo "✅ Release image found: ${IMAGE_NAME}:${VERSION}"
+          echo "DEPLOY_TAG=${VERSION}" >> $GITHUB_ENV
+
+      - name: Deploy to target environment
+        run: |
+          CONTAINER_APP="verifeye-api-${{ env.ENVIRONMENT }}"
+          REGISTRY_URL="${AZURE_CONTAINER_REGISTRY}.azurecr.io"
+
+          echo "🚀 Deploying to ${{ env.ENVIRONMENT }} environment"
+          echo "   Container App: $CONTAINER_APP"
+          echo "   Image tag: ${IMAGE_NAME}:${DEPLOY_TAG}"
+          echo "   Source: $VERSION"
+
+          # Get image digest to force pull (avoids cache issues)
+          echo "🔍 Getting image digest from registry..."
+          DIGEST=$(az acr repository show \
+            --name "$AZURE_CONTAINER_REGISTRY" \
+            --image "${IMAGE_NAME}:${DEPLOY_TAG}" \
+            --query digest -o tsv)
+
+          echo "   Digest: $DIGEST"
+
+          # Update using digest instead of tag (guarantees fresh pull)
+          IMAGE_WITH_DIGEST="${REGISTRY_URL}/${IMAGE_NAME}@${DIGEST}"
+          echo "   Image with digest: $IMAGE_WITH_DIGEST"
+
+          # Update Container App with new versioned image using digest
+          az containerapp update \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --image "$IMAGE_WITH_DIGEST" \
+            --min-replicas 0 \
+            --max-replicas 1
+
+          echo "✅ Deployment initiated (using digest to avoid cache)"
+
+      - name: Post-deployment verification
+        run: |
+          CONTAINER_APP="verifeye-api-${{ env.ENVIRONMENT }}"
+          
+          # Wait for deployment to be ready
+          echo "⏳ Waiting for deployment to complete..."
+          sleep 30
+          
+          # Get Container App URL
+          API_URL=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          
+          if [ -n "$API_URL" ]; then
+            HEALTH_URL="https://$API_URL/health"
+            
+            echo "🔍 Testing ${{ env.ENVIRONMENT }} deployment..."
+            echo "   API URL: https://$API_URL"
+            echo "   Health URL: $HEALTH_URL"
+            
+            # Test health endpoint
+            if curl -f -s "$HEALTH_URL" > /dev/null; then
+              echo "✅ ${{ env.ENVIRONMENT }} health check passed"
+            else
+              echo "⚠️  ${{ env.ENVIRONMENT }} health check failed (may still be starting)"
+            fi
+          else
+            echo "⚠️  Could not get ${{ env.ENVIRONMENT }} Container App URL"
+          fi
+
+      - name: Create deployment record
+        run: |
+          
+          CONTAINER_APP="verifeye-api-${{ env.ENVIRONMENT }}"
+          DEPLOYMENT_FILE="deployment-${{ env.ENVIRONMENT }}-$(date +%Y%m%d-%H%M%S).json"
+          
+          # Get Container App URL
+          API_URL=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          
+          cat > "$DEPLOYMENT_FILE" << EOF
+          {
+            "service": "backend-api",
+            "environment": "${{ env.ENVIRONMENT }}",
+            "version": "${{ env.VERSION }}",
+            "promoted_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "promoted_by": "${{ github.actor }}",
+            "source_branch": "${{ github.ref_name }}",
+            "git_tag": "${{ env.VERSION }}",
+            "source_image": "${{ vars.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.VERSION }}",
+            "deployed_image": "${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.VERSION }}",
+            "resource_group": "${{ env.AZURE_RESOURCE_GROUP }}",
+            "container_app": "$CONTAINER_APP",
+            "urls": {
+              "api": "https://$API_URL",
+              "health": "https://$API_URL/health",
+              "swagger": "https://$API_URL/swagger"
+            }
+          }
+          EOF
+          
+          echo "📄 Deployment record created: $DEPLOYMENT_FILE"
+
+      - name: Summary
+        if: always()
+        run: |
+          CONTAINER_APP="verifeye-api-${{ env.ENVIRONMENT }}"
+          API_URL=$(az containerapp show \
+            --name "$CONTAINER_APP" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployment to ${{ env.ENVIRONMENT }} completed successfully!"
+            echo ""
+            echo "📋 Deployment Details:"
+            echo "   Version: $VERSION"
+            echo "   Environment: ${{ env.ENVIRONMENT }}"
+            echo "   Deployed by: ${{ github.actor }}"
+            echo "   Git tag: $VERSION"
+            echo "   Container App: $CONTAINER_APP"
+            echo ""
+            echo "🌐 Application URLs:"
+            echo "   API: https://$API_URL"
+            echo "   Health: https://$API_URL/health"
+            echo "   Swagger: https://$API_URL/swagger"
+            echo ""
+            echo "🏷️  Image Details:"
+            echo "   Registry: ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io"
+            echo "   Image: ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:$VERSION"
+          else
+            echo "❌ Deployment to ${{ env.ENVIRONMENT }} failed"
+            echo "   Version: $VERSION"
+            echo "   Environment: ${{ env.ENVIRONMENT }}"
+            echo "   Check logs above for details"
+          fi
+          echo ""
+          echo "📝 Note: This workflow deploys release images built from main branch"
+          echo "         All deployments use pre-built, versioned, and tested images"

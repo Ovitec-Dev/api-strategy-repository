@@ -5,11 +5,19 @@ import { ValidationResultDto, BacktestResultDto } from '@/dtos/ValidationResultD
 
 export class StrategyMapper {
   static toEntity(dto: CreateStrategyDto): Partial<Strategy> {
+    const config: Record<string, any> = {};
+    if (dto.strategy_type) config.strategy_type = dto.strategy_type;
+    if (dto.market) config.market = dto.market;
+    if (dto.symbol) config.symbol = dto.symbol;
+    if (dto.timeframe) config.timeframe = dto.timeframe;
+    if (dto.parameters) config.parameters = dto.parameters;
+
     return {
       name: dto.name,
       description: dto.description,
       user_id: dto.user_id,
-      status: StrategyStatus.PENDING
+      status: StrategyStatus.PENDING,
+      config: Object.keys(config).length > 0 ? config : undefined,
     };
   }
 

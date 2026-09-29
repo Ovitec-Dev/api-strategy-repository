@@ -8,6 +8,7 @@ import { BacktestResult } from './entities/backtest-result.entity';
 import { EventLog } from './entities/event-log.entity';
 import { Rule } from './entities/rule.entity';
 import { Validation } from './entities/validation.entity';
+import { ProcessedEvent } from './entities/processed-event.entity';
 import { StrategyController } from './strategy.controller';
 import { StrategyService } from './strategy.service';
 import { StrategySchedulerService } from './strategy-scheduler.service';
@@ -26,6 +27,7 @@ import { Order } from '@modules/order/entities/order.entity';
       StrategyRule,
       BacktestResult,
       EventLog,
+      ProcessedEvent,
       Rule,
       Validation,
       Order

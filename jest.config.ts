@@ -3,18 +3,20 @@ import type { Config } from 'jest';
 const config: Config = {
   preset: 'ts-jest',
   testEnvironment: 'node',
-  roots: ['<rootDir>'],
-  testMatch: ['**/__tests__/**/*.test.ts'],
+  roots: ['<rootDir>/src'],
+  testMatch: ['**/*.spec.ts'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
+    '^@shared/(.*)$': '<rootDir>/src/shared/$1',
+    '^@modules/(.*)$': '<rootDir>/src/modules/$1',
   },
-  globals: {
-    'ts-jest': {
+  transform: {
+    '^.+\\.ts$': ['ts-jest', {
       tsconfig: '<rootDir>/tsconfig.json',
       isolatedModules: true,
-      diagnostics: false,
-    },
+    }],
   },
+  moduleFileExtensions: ['ts', 'js', 'json'],
 };
 
 export default config;

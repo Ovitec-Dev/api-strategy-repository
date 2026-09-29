@@ -1,47 +1,52 @@
-# Contratos de eventos — api-strategy-repository
+# Event Contracts — api-strategy-repository
 
-Eventos publicados/consumidos por este servicio a través de RabbitMQ.
+Events published/consumed by this service through RabbitMQ exchange `trading_events`.
 
-- **Exchange:** `trading_events` (topic, durable) — configurable vía `RABBITMQ_EXCHANGE`
-- **Routing key:** igual al `event_type`
-- **Colas de este servicio:** `<queuePrefix>_<event_type>` (ver `rabbit.queuePrefix` en config)
-- **Versionado:** cada contrato se versiona con sufijo `.v1`. La routing key actual en el wire
-  es el nombre sin sufijo (compatibilidad con `api-trading-strategy`). Renombrar la routing key
-  es un cambio coordinado entre ambos servicios y está fuera del scope de esta rama.
+**Exchange:** `trading_events` (topic, durable) — configurable via `RABBITMQ_EXCHANGE`
+**Routing key:** equals `event_type` (no version suffix — see Decision below)
+**Queues:** `{queuePrefix}_{event_type}` (see `rabbit.queuePrefix` in config)
+**Dedup:** all consumers check `event_id` against `processed_events` store before any write
+**Envelope:** see §0
 
-## Envelope común
+## Versioning decision
 
-Todo mensaje (en ambos sentidos) usa este envelope:
+Contracts are documented with `.v1` suffix for clarity, but **routing keys on the wire
+have no suffix** (e.g. `strategy.requested`, not `strategy.requested.v1`). Renaming routing
+keys is a breaking change requiring coordinated updates to `api-trading-strategy`.
+
+The `metadata.schema_version` field is `1` for all events below. Mismatches are logged
+but not rejected (NFR-NEST-02).
+
+---
+
+## §0 Envelope (common)
 
 ```json
 {
   "event_id": "string",
   "event_type": "string",
   "timestamp": "string (ISO-8601)",
-  "data": { },
-  "metadata": { }
+  "data": { ... },
+  "metadata": { "source": "string", "schema_version": "string" }
 }
 ```
 
-| Campo        | Tipo              | Descripción                                                                 |
-|--------------|-------------------|-----------------------------------------------------------------------------|
-| `event_id`   | string            | Nest: `evt_<epoch_ms>_<rand>`; Python (api-trading-strategy): UUID v4       |
-| `event_type` | string            | Nombre del evento (routing key)                                             |
-| `timestamp`  | string (ISO-8601) | Momento de publicación                                                      |
-| `data`       | object            | Payload específico de cada evento (ver abajo)                               |
-| `metadata`   | object            | Nest: `{ "source": "strategy-repository", "version": "1.0.0" }`; Python: `{}` |
-
-Código del envelope: `src/shared/messaging/messaging.service.ts` (Nest) y
-`api-trading-strategy/src/core/events/event_bus.py` (`EventMessage`).
+| Field        | Type              | Notes                                                        |
+|--------------|-------------------|--------------------------------------------------------------|
+| `event_id`   | string            | Nest: `evt_<epoch>_<rand>`; Python: UUID v4                  |
+| `event_type` | string            | Routing key (unsuffixed)                                     |
+| `timestamp`  | string            | ISO-8601                                                     |
+| `data`       | object            | Event-specific payload                                       |
+| `metadata`   | object            | `source`: producer id; `schema_version`: `"1"` for all events below |
 
 ---
 
 ## strategy.requested.v1
 
-Solicitud de nueva estrategia para parsing/validación.
+Request for a new strategy to be parsed/validated by Python.
 
-- **Publica:** Nest — `StrategyRepository.publishStrategyRequested` (`src/modules/strategy/repositories/strategy.repository.ts`) al crear una estrategia
-- **Consume:** api-trading-strategy — `nlp_service.py` (routing key `strategy.requested`)
+- **Publisher:** Nest — `StrategyRepository.publishStrategyRequested`
+- **Consumer:** api-trading-strategy → `nlp_service`
 
 ### `data`
 
@@ -51,85 +56,67 @@ Solicitud de nueva estrategia para parsing/validación.
   "user_id": "1f0e6c9a-8b2d-4c5f-9a10-2b3c4d5e6f70",
   "name": "Cruce de medias BTC",
   "description": "Comprar cuando SMA10 cruza sobre SMA30",
-  "status": "pending",
-  "created_at": "2026-08-08T12:00:00.000Z"
+  "status": "PENDING",
+  "created_at": "2026-08-08T12:00:00.000Z",
+  "strategy_type": "moving_average",
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "parameters": { "short_period": 10, "long_period": 30 }
 }
 ```
 
-| Campo         | Tipo   | Requerido | Descripción                                              |
-|---------------|--------|-----------|----------------------------------------------------------|
-| `strategy_id` | string (uuid) | sí | ID de la estrategia en este servicio              |
-| `user_id`     | string (uuid) | sí | Usuario dueño de la estrategia                    |
-| `name`        | string | sí        | Nombre de la estrategia                                   |
-| `description` | string \| null | no | Descripción                                        |
-| `status`      | string | sí        | Estado inicial (`pending`, `validated`, `running`, `completed`, `failed`, `archived`) |
-| `created_at`  | string (ISO-8601) | sí | Fecha de creación                                |
+| Field           | Type             | Required | Source                                              |
+|-----------------|------------------|----------|-----------------------------------------------------|
+| `strategy_id`   | string (uuid)    | yes      | Nest strategy PK                                    |
+| `user_id`       | string (uuid)    | yes      | From JWT / creation DTO                             |
+| `name`          | string           | yes      | Creation DTO                                        |
+| `description`   | string \| null   | no       | Creation DTO                                        |
+| `status`        | string           | yes      | `PENDING`                                           |
+| `created_at`    | string (ISO)     | yes      | Nest timestamp                                      |
+| `strategy_type` | string \| null   | no       | DTO → `config.strategy_type` (e.g. `moving_average`, `rsi`) |
+| `symbol`        | string \| null   | no       | DTO → `config.symbol` (e.g. `BTCUSDT`)              |
+| `timeframe`     | string \| null   | no       | DTO → `config.timeframe` (e.g. `1h`, `1d`)          |
+| `parameters`    | object           | yes `{}` | DTO → `config.parameters` (rule params for Python)  |
 
 ---
 
 ## strategy.validated.v1
 
-Resultado de validación de una estrategia.
+Strategy passed validation in Python.
 
-- **Publica:** api-trading-strategy — `strategy_validator.py` (serializa `StrategyValidated.dict()`)
-- **Consume:** Nest — `EventConsumerService.handleStrategyValidated` (`src/modules/strategy/event-consumer.service.ts`)
+- **Publisher:** api-trading-strategy → `strategy_validator`
+- **Consumer:** Nest → `EventConsumerService.handleStrategyValidated`
 
 ### `data`
 
 ```json
 {
-  "parsed_strategy": {
-    "original_request": {
-      "name": "Cruce de medias BTC",
-      "description": "Comprar cuando SMA10 cruza sobre SMA30",
-      "strategy_type": "moving_average",
-      "market": "crypto",
-      "symbol": "BTCUSDT",
-      "timeframe": "1h",
-      "parameters": { "short_period": 10, "long_period": 30 },
-      "natural_language_description": "comprar btc cuando la media corta cruza la larga",
-      "user_id": "1f0e6c9a-8b2d-4c5f-9a10-2b3c4d5e6f70",
-      "risk_management": { "stop_loss": 2.0, "take_profit": 4.0 }
-    },
-    "parsed_parameters": { "short_period": 10, "long_period": 30 },
-    "confidence_score": 0.92,
-    "validation_errors": [],
-    "created_at": "2026-08-08T12:00:01.000Z"
-  },
+  "strategy_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "is_valid": true,
   "validation_messages": [],
-  "risk_assessment": {
-    "risk_score": 0.42,
-    "risk_level": "MEDIO",
-    "risk_factors": ["stop_loss ajustado"],
-    "confidence_impact": -0.05
-  },
+  "risk_assessment": { "risk_score": 0.42, "risk_level": "MEDIO" },
   "validated_at": "2026-08-08T12:00:02.000Z"
 }
 ```
 
-| Campo                 | Tipo     | Requerido | Descripción                                            |
-|-----------------------|----------|-----------|--------------------------------------------------------|
-| `parsed_strategy`     | object   | sí        | Estrategia parseada por NLP (`StrategyParsed`)         |
-| `is_valid`            | boolean  | sí        | Resultado de la validación                             |
-| `validation_messages` | string[] | sí (default `[]`) | Mensajes de validación                         |
-| `risk_assessment`     | object   | sí (default `{}`) | `risk_score`: float 0..1; `risk_level`: `BAJO`\|`MEDIO`\|`ALTO`; `risk_factors`: string[]; `confidence_impact`: float |
-| `validated_at`        | string (ISO-8601) | sí | Fecha de validación                            |
-
-> **Gap conocido:** el consumidor Nest lee `data.strategy_id`, que el modelo `StrategyValidated`
-> del productor no incluye en el nivel raíz. Hasta que el productor lo agregue, Nest recibe
-> `undefined` en ese campo. El contrato v1 exige `strategy_id` (uuid) en la raíz de `data`.
+| Field                 | Type      | Required | Notes                                              |
+|-----------------------|-----------|----------|----------------------------------------------------|
+| `strategy_id`         | string    | yes      | At root level (FR-NEST-02)                         |
+| `is_valid`            | boolean   | yes      | Always `true` for this event                       |
+| `validation_messages` | string[]  | yes `[]`|                                                    |
+| `risk_assessment`     | object    | yes `{}` | `risk_score`: float 0..1; `risk_level`: enum       |
+| `validated_at`        | string    | no       | Optional ISO timestamp                             |
 
 ---
 
 ## strategy.invalidated.v1
 
-Estrategia rechazada por validación.
+Strategy failed validation in Python.
 
-- **Publica:** sin productor activo actualmente (api-trading-strategy publica `strategy.validated.error` ante excepciones; no emite `strategy.invalidated` todavía)
-- **Consume:** Nest — `EventConsumerService.handleStrategyInvalidated`
+- **Publisher:** api-trading-strategy (future — currently emits `strategy.validated.error` on exceptions)
+- **Consumer:** Nest → `EventConsumerService.handleStrategyInvalidated`
 
-### `data` (contrato esperado)
+### `data`
 
 ```json
 {
@@ -139,138 +126,141 @@ Estrategia rechazada por validación.
 }
 ```
 
-| Campo                 | Tipo     | Requerido | Descripción                          |
-|-----------------------|----------|-----------|--------------------------------------|
-| `strategy_id`         | string (uuid) | sí | ID de la estrategia rechazada  |
-| `validation_messages` | string[] | sí (default `[]`) | Motivos del rechazo          |
-| `risk_assessment`     | object   | no (default `{}`) | Evaluación de riesgo         |
+| Field                 | Type      | Required | Notes                     |
+|-----------------------|-----------|----------|---------------------------|
+| `strategy_id`         | string    | yes      |                           |
+| `validation_messages` | string[]  | yes `[]` | Reasons for rejection     |
+| `risk_assessment`     | object    | yes `{}` |                           |
 
 ---
 
 ## backtest.completed.v1
 
-Resultado de backtesting completado.
+Backtesting completed in Python.
 
-- **Publica:** api-trading-strategy — `backtesting_engine.py` (serializa `BacktestResult.dict()`)
-- **Consume:** Nest — `EventConsumerService.handleBacktestCompleted`; api-trading-strategy — `ai_evaluator.py`
+- **Publisher:** api-trading-strategy → `backtesting_engine`
+- **Consumer:** Nest → `EventConsumerService.handleBacktestCompleted`; api-trading-strategy → `ai_evaluator`
 
 ### `data`
 
 ```json
 {
   "strategy_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "total_return": 0.15,
-  "sharpe_ratio": 1.5,
-  "max_drawdown": -0.08,
-  "win_rate": 0.65,
-  "total_trades": 100,
-  "profitable_trades": 65,
-  "trades": [
+  "user_id": "1f0e6c9a-8b2d-4c5f-9a10-2b3c4d5e6f70",
+  "performance_metrics": {
+    "total_return": 0.15,
+    "sharpe_ratio": 1.5,
+    "max_drawdown": 0.08,
+    "win_rate": 0.65,
+    "total_trades": 100,
+    "profitable_trades": 65
+  },
+  "trade_log": [
     { "date": "2026-01-05T00:00:00Z", "side": "buy", "price": 42000.5, "quantity": 0.01 }
-  ],
-  "equity_curve": [
-    { "date": "2026-01-05T00:00:00Z", "equity": 10000.0 }
-  ],
-  "completed_at": "2026-08-08T12:05:00.000Z"
+  ]
 }
 ```
 
-| Campo               | Tipo     | Requerido | Descripción                          |
-|---------------------|----------|-----------|--------------------------------------|
-| `strategy_id`       | string   | sí        | ID de la estrategia                  |
-| `total_return`      | float    | sí        | Retorno total (ej. `0.15` = 15%)     |
-| `sharpe_ratio`      | float    | sí        | Ratio de Sharpe                      |
-| `max_drawdown`      | float    | sí        | Máximo drawdown (negativo)           |
-| `win_rate`          | float    | sí        | Tasa de ganancia 0..1                |
-| `total_trades`      | int      | sí        | Total de operaciones                 |
-| `profitable_trades` | int      | sí        | Operaciones rentables                |
-| `trades`            | object[] | sí (default `[]`) | Log de operaciones           |
-| `equity_curve`      | object[] | sí (default `[]`) | Curva de equity              |
-| `completed_at`      | string (ISO-8601) | sí | Fecha de finalización        |
-
-> **Gap conocido:** el consumidor Nest espera `data.user_id`, `data.performance_metrics`
-> (objeto anidado) y `data.trade_log`, mientras que el productor actual envía métricas planas
-> en la raíz y `trades`. El contrato v1 de Nest (`BacktestResultDto` en `src/dtos/ValidationResultDto.ts`)
-> es el objetivo a converger: agregar `user_id` y anidar métricas, o adaptar el consumidor.
+| Field                | Type     | Required | Notes                                            |
+|----------------------|----------|----------|--------------------------------------------------|
+| `strategy_id`        | string   | yes      |                                                  |
+| `user_id`            | string   | yes      | At root (FR-NEST-04)                             |
+| `performance_metrics`| object   | yes `{}`| Nested — not flat at root                        |
+| `performance_metrics.max_drawdown` | number | yes | **Positive fraction** (FR-NEST-06, e.g. `0.08` not `-0.08`) |
+| `trade_log`          | object[] | yes `[]` |                                                  |
 
 ---
 
 ## backtest.failed.v1
 
-Fallo de backtesting.
+Backtesting failed in Python.
 
-- **Publica:** sin productor activo actualmente (api-trading-strategy publica `backtest.completed.error` ante excepciones)
-- **Consume:** Nest — `EventConsumerService.handleBacktestFailed`
-
-### `data` (contrato esperado)
-
-```json
-{
-  "strategy_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "error": "No hay datos disponibles para el símbolo solicitado"
-}
-```
-
-| Campo         | Tipo   | Requerido | Descripción                     |
-|---------------|--------|-----------|---------------------------------|
-| `strategy_id` | string (uuid) | sí | Estrategia cuyo backtest falló |
-| `error`       | string | sí        | Descripción del error           |
-
----
-
-## evaluation.completed.v1
-
-Resultado de la evaluación por IA de una estrategia ya backtesteada.
-
-- **Publica:** api-trading-strategy — `ai_evaluator.py` (serializa `EvaluationResult.dict()`)
-- **Consume:** Nest — `EventConsumerService.handleEvaluationCompleted`; api-trading-strategy — `log_writer.py`
+- **Publisher:** api-trading-strategy (future — currently emits `backtest.completed.error` on exceptions)
+- **Consumer:** Nest → `EventConsumerService.handleBacktestFailed`
 
 ### `data`
 
 ```json
 {
-  "backtest_result": {
-    "strategy_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-    "total_return": 0.15,
-    "sharpe_ratio": 1.5,
-    "max_drawdown": -0.08,
-    "win_rate": 0.65,
-    "total_trades": 100,
-    "profitable_trades": 65,
-    "trades": [],
-    "equity_curve": [],
-    "completed_at": "2026-08-08T12:05:00.000Z"
-  },
-  "ai_score": 0.78,
-  "ai_recommendation": "Estrategia prometedora, considerar implementación",
-  "risk_level": "MEDIO",
-  "confidence": 0.85,
-  "evaluation_details": { "motivos": ["sharpe > 1.2", "drawdown acotado"] },
-  "evaluated_at": "2026-08-08T12:06:00.000Z"
+  "strategy_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "error": "Data source unavailable"
 }
 ```
 
-| Campo                 | Tipo     | Requerido | Descripción                                  |
-|-----------------------|----------|-----------|----------------------------------------------|
-| `backtest_result`     | object   | sí        | `BacktestResult` completo (ver evento anterior) |
-| `ai_score`            | float    | sí        | Puntuación 0..1                              |
-| `ai_recommendation`   | string   | sí        | Recomendación de la IA                       |
-| `risk_level`          | string   | sí        | `BAJO` \| `MEDIO` \| `ALTO`                  |
-| `confidence`          | float    | sí        | Confianza 0..1                               |
-| `evaluation_details`  | object   | sí (default `{}`) | Detalles de la evaluación            |
-| `evaluated_at`        | string (ISO-8601) | sí | Fecha de evaluación                  |
-
-> **Gap conocido:** el consumidor Nest lee `data.strategy_id` en la raíz; el productor actual
-> lo envía anidado en `data.backtest_result.strategy_id`. El contrato v1 exige `strategy_id`
-> en la raíz (o adaptar el consumidor a leer el path anidado).
+| Field         | Type   | Required | Notes          |
+|---------------|--------|----------|----------------|
+| `strategy_id` | string | yes      |                |
+| `error`       | string | yes      | Error message  |
 
 ---
 
-## Otros eventos (fuera de este contrato v1)
+## evaluation.completed.v1
 
-| Evento                        | Dirección | Observación |
-|-------------------------------|-----------|-------------|
-| `strategy.execution.started`  | Nest publica | Emitido por `StrategyService.executeManual` y `StrategySchedulerService`; payload: `{ executionId, orderId, config }`. Candidato a `v1` en próxima iteración |
-| `strategy.failed`             | Nest consume | Sin productor activo; payload esperado `{ strategy_id, error }` |
-| `strategy.created` / `strategy.updated` / `strategy.deleted` / `strategy.status_updated` | Solo `EventLog` interno | No se publican al broker |
-| `*.error` (`strategy.validated.error`, `backtest.completed.error`, `evaluation.completed.error`) | Python publica | Emitidos ante excepciones; payload `{ error, original_request }` |
+AI evaluation completed in Python.
+
+- **Publisher:** api-trading-strategy → `ai_evaluator`
+- **Consumer:** Nest → `EventConsumerService.handleEvaluationCompleted`; api-trading-strategy → `log_writer`
+
+### `data`
+
+```json
+{
+  "strategy_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "ai_score": 0.78,
+  "ai_recommendation": "Deploy",
+  "risk_level": "MEDIO",
+  "confidence": 0.85,
+  "evaluation_details": {}
+}
+```
+
+| Field               | Type   | Required | Notes                          |
+|---------------------|--------|----------|--------------------------------|
+| `strategy_id`       | string | yes      | At root (FR-NEST-07)           |
+| `ai_score`          | float  | yes      | 0..1                           |
+| `ai_recommendation` | string | yes      |                                |
+| `risk_level`        | string | yes      | `BAJO` \| `MEDIO` \| `ALTO`   |
+| `confidence`        | float  | yes      | 0..1                           |
+| `evaluation_details`| object | yes `{}`|                                |
+
+---
+
+## evaluation.skipped.v1
+
+AI evaluation was skipped (terminal state, equivalent to completed for tracking).
+
+- **Publisher:** api-trading-strategy (new)
+- **Consumer:** Nest → `EventConsumerService.handleEvaluationSkipped`
+
+### `data`
+
+```json
+{
+  "strategy_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "reason": "Insufficient backtest data"
+}
+```
+
+| Field         | Type   | Required | Notes                            |
+|---------------|--------|----------|----------------------------------|
+| `strategy_id` | string | yes      |                                  |
+| `reason`      | string | no       | Defaults to "Evaluation skipped by pipeline" |
+
+---
+
+## Other events (outside this v1 contract)
+
+| Event                        | Direction          | Notes                                                     |
+|------------------------------|--------------------|-----------------------------------------------------------|
+| `strategy.execution.started` | Nest publishes     | Payload: `{ executionId, orderId, config }`. Candidate for v1 next iteration |
+| `strategy.failed`            | Nest consumes      | Payload: `{ strategy_id, error }`. No active producer yet |
+| `strategy.created/updated/deleted` | Internal only  | Logged to `event_logs`, not published to broker            |
+| `*.error` variants           | Python publishes   | Emitted on exceptions: `{ error, original_request }`      |
+
+---
+
+## Dedup store (FR-NEST-10/11)
+
+Table `processed_events` (column: `event_id` unique, `event_type`, `processed_at`).
+Every consumer checks `isEventProcessed(event_id)` before any write, then calls
+`markEventProcessed(event_id, event_type)`. Retention policy TBD (FR-NEST-11).
